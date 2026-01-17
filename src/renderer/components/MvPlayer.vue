@@ -84,7 +84,7 @@
                 {{ t('player.next') }}
               </n-tooltip>
 
-              <!-- 修复：下载按钮正确嵌套，格式规范 -->
+              <!下载按钮>
               <n-tooltip placement="top">
                 <template #trigger>
                   <n-button quaternary circle @click="handleDownload">
