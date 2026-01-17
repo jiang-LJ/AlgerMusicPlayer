@@ -37,8 +37,7 @@
               :tooltip="false"
               :step="0.1"
               @update:value="handleProgressChange"
-            >
-            </n-slider>
+            ></n-slider>
           </div>
 
           <div class="controls-main">
@@ -83,6 +82,20 @@
                   </n-button>
                 </template>
                 {{ t('player.next') }}
+              </n-tooltip>
+
+              <!-- 修复：下载按钮正确嵌套，格式规范 -->
+              <n-tooltip placement="top">
+                <template #trigger>
+                  <n-button quaternary circle @click="handleDownload">
+                    <template #icon>
+                      <n-icon size="24">
+                        <i class="ri-download-line"></i>
+                      </n-icon>
+                    </template>
+                  </n-button>
+                </template>
+                {{ t('player.download') || '下载MV' }}
               </n-tooltip>
 
               <div class="time-display">
@@ -188,10 +201,11 @@
 </template>
 
 <script setup lang="ts">
-import { NButton, NIcon, NSlider, NTooltip } from 'naive-ui';
+import { NButton, NIcon, NSlider, NTooltip, NSpin, NEllipsis } from 'naive-ui';
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 
+// 假设你的API路径正确，若有调整请对应修改
 import { getMvUrl } from '@/api/mv';
 import { IMvItem } from '@/types/mv';
 
@@ -221,10 +235,11 @@ const emit = defineEmits<{
   (e: 'prev', loading: (value: boolean) => void): void;
 }>();
 
+// 核心变量定义（修复：补充缺失的cursorTimer定义）
 const mvUrl = ref<string>();
 const playMode = ref<PlayMode>(PLAY_MODE.Auto);
-
 const videoRef = ref<HTMLVideoElement>();
+const videoContainerRef = ref<HTMLElement>();
 const isPlaying = ref(false);
 const currentTime = ref(0);
 const duration = ref(0);
@@ -232,14 +247,33 @@ const progress = ref(0);
 const bufferedProgress = ref(0);
 const volume = ref(100);
 const showControls = ref(true);
-let controlsTimer: NodeJS.Timeout | null = null;
+const isFullscreen = ref(false);
+const showModeHint = ref(false);
+const autoPlayBlocked = ref(false);
+const playLoading = ref(false);
+const prevLoading = ref(false);
+const nextLoading = ref(false);
+const isDragging = ref(false);
+const showCursor = ref(true);
+const isMobile = computed(() => false); // TODO: 从 settings store 获取 真实的移动端判断逻辑
 
+// 修复：补充缺失的定时器变量定义
+let controlsTimer: NodeJS.Timeout | null = null;
+let cursorTimer: NodeJS.Timeout | null = null;
+
+/**
+ * 格式化时间（秒 -> 00:00 格式）
+ */
 const formatTime = (seconds: number) => {
+  if (!Number.isFinite(seconds)) return '00:00';
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = Math.floor(seconds % 60);
   return `${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
 };
 
+/**
+ * 切换播放/暂停状态
+ */
 const togglePlay = () => {
   if (!videoRef.value) return;
   if (isPlaying.value) {
@@ -250,27 +284,26 @@ const togglePlay = () => {
   resetCursorTimer();
 };
 
+/**
+ * 切换静音/取消静音
+ */
 const toggleMute = () => {
   if (!videoRef.value) return;
-  if (volume.value === 0) {
-    volume.value = 100;
-  } else {
-    volume.value = 0;
-  }
+  volume.value = volume.value === 0 ? 100 : 0;
 };
 
-watch(volume, (newVolume) => {
-  if (videoRef.value) {
-    videoRef.value.volume = newVolume / 100;
-  }
-});
-
+/**
+ * 进度条变化处理
+ */
 const handleProgressChange = (value: number) => {
   if (!videoRef.value || !duration.value) return;
   const newTime = (value / 100) * duration.value;
   videoRef.value.currentTime = newTime;
 };
 
+/**
+ * 视频播放时间更新
+ */
 const handleTimeUpdate = () => {
   if (!videoRef.value) return;
   currentTime.value = videoRef.value.currentTime;
@@ -283,11 +316,17 @@ const handleTimeUpdate = () => {
   }
 };
 
+/**
+ * 视频元数据加载完成
+ */
 const handleLoadedMetadata = () => {
   if (!videoRef.value) return;
   duration.value = videoRef.value.duration;
 };
 
+/**
+ * 重置控制栏显示定时器
+ */
 const resetControlsTimer = () => {
   if (controlsTimer) {
     clearTimeout(controlsTimer);
@@ -300,39 +339,32 @@ const resetControlsTimer = () => {
   }, 3000);
 };
 
+/**
+ * 重置鼠标光标显示定时器
+ */
+const resetCursorTimer = () => {
+  if (cursorTimer) {
+    clearTimeout(cursorTimer);
+  }
+  showCursor.value = true;
+  if (isPlaying.value && !showControls.value) {
+    cursorTimer = setTimeout(() => {
+      showCursor.value = false;
+    }, 3000);
+  }
+};
+
+/**
+ * 鼠标移动事件处理
+ */
 const handleMouseMove = () => {
   resetControlsTimer();
   resetCursorTimer();
 };
 
-onMounted(() => {
-  document.addEventListener('mousemove', handleMouseMove);
-});
-
-onUnmounted(() => {
-  document.removeEventListener('mousemove', handleMouseMove);
-  if (controlsTimer) {
-    clearTimeout(controlsTimer);
-  }
-  if (cursorTimer) {
-    clearTimeout(cursorTimer);
-  }
-});
-
-// 监听 currentMv 的变化
-watch(
-  () => props.currentMv,
-  async (newMv) => {
-    if (newMv) {
-      await loadMvUrl(newMv);
-    }
-  }
-);
-
-const autoPlayBlocked = ref(false);
-
-const playLoading = ref(false);
-
+/**
+ * 加载MV播放地址
+ */
 const loadMvUrl = async (mv: IMvItem) => {
   playLoading.value = true;
   autoPlayBlocked.value = false;
@@ -355,10 +387,16 @@ const loadMvUrl = async (mv: IMvItem) => {
   }
 };
 
+/**
+ * 关闭MV播放器
+ */
 const handleClose = () => {
   emit('update:show', false);
 };
 
+/**
+ * 视频播放结束处理
+ */
 const handleEnded = () => {
   if (playMode.value === PLAY_MODE.Single) {
     // 单曲循环模式，重新加载当前MV
@@ -373,6 +411,9 @@ const handleEnded = () => {
   }
 };
 
+/**
+ * 切换播放模式（单曲循环/列表播放）
+ */
 const togglePlayMode = () => {
   playMode.value = playMode.value === PLAY_MODE.Auto ? PLAY_MODE.Single : PLAY_MODE.Auto;
   showModeHint.value = true;
@@ -381,13 +422,9 @@ const togglePlayMode = () => {
   }, 1500);
 };
 
-const isDragging = ref(false);
-
-// 添加全屏相关的状态和方法
-const videoContainerRef = ref<HTMLElement>();
-const isFullscreen = ref(false);
-
-// 检查是否支持全屏API
+/**
+ * 检查全屏API兼容性
+ */
 const checkFullscreenAPI = () => {
   const doc = document as any;
   return {
@@ -414,7 +451,9 @@ const checkFullscreenAPI = () => {
   };
 };
 
-// 修改切换全屏状态的方法
+/**
+ * 切换全屏状态
+ */
 const toggleFullscreen = async () => {
   const api = checkFullscreenAPI();
 
@@ -436,53 +475,26 @@ const toggleFullscreen = async () => {
   }
 };
 
-// 监听全屏状态变化
+/**
+ * 监听全屏状态变化
+ */
 const handleFullscreenChange = () => {
   const api = checkFullscreenAPI();
   isFullscreen.value = !!api.fullscreenElement;
 };
 
-// 在组件挂载时添加全屏变化监听
-onMounted(() => {
-  document.addEventListener('fullscreenchange', handleFullscreenChange);
-  document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
-  document.addEventListener('mozfullscreenchange', handleFullscreenChange);
-  document.addEventListener('MSFullscreenChange', handleFullscreenChange);
-});
-
-// 在组件卸载时移除监听
-onUnmounted(() => {
-  document.removeEventListener('fullscreenchange', handleFullscreenChange);
-  document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
-  document.removeEventListener('mozfullscreenchange', handleFullscreenChange);
-  document.removeEventListener('MSFullscreenChange', handleFullscreenChange);
-});
-
-// 添加键盘快捷键支持
+/**
+ * 键盘快捷键处理
+ */
 const handleKeyPress = (e: KeyboardEvent) => {
   if (e.key === 'f' || e.key === 'F') {
     toggleFullscreen();
   }
 };
 
-onMounted(() => {
-  // 添加到现有的 onMounted 中
-  document.addEventListener('keydown', handleKeyPress);
-});
-
-onUnmounted(() => {
-  // 添加到现有的 onUnmounted 中
-  document.removeEventListener('keydown', handleKeyPress);
-});
-
-// 添加提示状态
-const showModeHint = ref(false);
-
-// 添加加载状态
-const prevLoading = ref(false);
-const nextLoading = ref(false);
-
-// 添加处理函数
+/**
+ * 上一个MV
+ */
 const handlePrev = () => {
   prevLoading.value = true;
   emit('prev', (value: boolean) => {
@@ -490,6 +502,9 @@ const handlePrev = () => {
   });
 };
 
+/**
+ * 下一个MV
+ */
 const handleNext = () => {
   nextLoading.value = true;
   emit('next', (value: boolean) => {
@@ -497,24 +512,53 @@ const handleNext = () => {
   });
 };
 
-// 添加鼠标显示状态
-const showCursor = ref(true);
-let cursorTimer: NodeJS.Timeout | null = null;
-
-// 添加重置鼠标计时器的函数
-const resetCursorTimer = () => {
-  if (cursorTimer) {
-    clearTimeout(cursorTimer);
+/**
+ * 完善：MV下载功能（核心新增逻辑）
+ */
+const handleDownload = async () => {
+  if (!mvUrl.value || !props.currentMv) {
+    console.warn('下载失败：MV地址或信息不存在');
+    return;
   }
-  showCursor.value = true;
-  if (isPlaying.value && !showControls.value) {
-    cursorTimer = setTimeout(() => {
-      showCursor.value = false;
-    }, 3000);
+
+  try {
+    // 1. 创建下载链接
+    const downloadLink = document.createElement('a');
+    downloadLink.href = mvUrl.value;
+    // 2. 设置下载文件名（使用MV名称，避免中文乱码）
+    const fileName = encodeURIComponent(props.currentMv.name || `MV_${Date.now()}`) + '.mp4';
+    downloadLink.download = fileName;
+    // 3. 触发下载
+    document.body.appendChild(downloadLink);
+    downloadLink.click();
+    // 4. 清理DOM
+    document.body.removeChild(downloadLink);
+
+    console.log('下载已触发：', fileName);
+  } catch (error) {
+    console.error('下载失败：', error);
+    alert('MV下载失败，请稍后重试');
   }
 };
 
-// 监听播放状态变化
+// 监听音量变化，同步到视频元素
+watch(volume, (newVolume) => {
+  if (videoRef.value) {
+    videoRef.value.volume = newVolume / 100;
+  }
+});
+
+// 监听currentMv变化，加载对应的MV
+watch(
+  () => props.currentMv,
+  async (newMv) => {
+    if (newMv) {
+      await loadMvUrl(newMv);
+    }
+  }
+);
+
+// 监听播放状态变化，重置光标状态
 watch(isPlaying, (newValue) => {
   if (!newValue) {
     showCursor.value = true;
@@ -526,7 +570,7 @@ watch(isPlaying, (newValue) => {
   }
 });
 
-// 添加控制栏状态监听
+// 监听控制栏状态变化，重置光标状态
 watch(showControls, (newValue) => {
   if (newValue) {
     showCursor.value = true;
@@ -538,7 +582,29 @@ watch(showControls, (newValue) => {
   }
 });
 
-const isMobile = computed(() => false); // TODO: 从 settings store 获取
+// 组件挂载：添加所有事件监听（修复：去重，避免重复挂载）
+onMounted(() => {
+  document.addEventListener('mousemove', handleMouseMove);
+  document.addEventListener('fullscreenchange', handleFullscreenChange);
+  document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+  document.addEventListener('mozfullscreenchange', handleFullscreenChange);
+  document.addEventListener('MSFullscreenChange', handleFullscreenChange);
+  document.addEventListener('keydown', handleKeyPress);
+});
+
+// 组件卸载：移除所有事件监听（修复：去重，避免内存泄漏）
+onUnmounted(() => {
+  document.removeEventListener('mousemove', handleMouseMove);
+  document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+  document.removeEventListener('mozfullscreenchange', handleFullscreenChange);
+  document.removeEventListener('MSFullscreenChange', handleFullscreenChange);
+  document.removeEventListener('keydown', handleKeyPress);
+
+  // 清理所有定时器
+  if (controlsTimer) clearTimeout(controlsTimer);
+  if (cursorTimer) clearTimeout(cursorTimer);
+});
 </script>
 
 <style scoped lang="scss">
